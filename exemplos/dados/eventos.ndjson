@@ -1,0 +1,2 @@
+{"ts":"2026-10-01T10:00:00Z","agente_id":1,"evento":"login"}
+{"ts":"2026-10-01T10:05:00Z","agente_id":2,"evento":"logout","extra":{"ip":"10.0.0.2"}}

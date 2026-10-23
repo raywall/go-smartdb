@@ -1,0 +1,5 @@
+[
+  {"id": 1, "nome": "Ana Souza", "codinome": "Falcão", "ativo": true, "nivel": 3, "salario": 8500.50, "skills": ["infiltração", "idiomas"], "base": {"cidade": "São Paulo", "uf": "SP"}},
+  {"id": 2, "nome": "Bruno Lima", "codinome": "Coruja", "ativo": false, "nivel": 5, "salario": 12000, "skills": ["criptografia"], "base": {"cidade": "Recife", "uf": "PE"}},
+  {"id": 3, "nome": "Carla Dias", "codinome": "Raposa", "ativo": true, "nivel": 2, "salario": 6400.75, "skills": [], "base": {"cidade": "Curitiba", "uf": "PR"}, "observacao": "em treinamento"}
+]

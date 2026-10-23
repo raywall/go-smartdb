@@ -1,0 +1,5 @@
+{"missoes": [
+  {"id": "M-001", "agente_id": 1, "titulo": "Operação Aurora", "status": "concluida", "inicio": "2026-01-10"},
+  {"id": "M-002", "agente_id": 1, "titulo": "Operação Eclipse", "status": "em_andamento", "inicio": "2026-08-02"},
+  {"id": "M-003", "agente_id": 3, "titulo": "Operação Vento Sul", "status": "planejada", "inicio": null}
+]}
