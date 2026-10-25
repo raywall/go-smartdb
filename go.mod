@@ -1,4 +1,4 @@
-module github.com/raywall/go-dbserver-plugin
+module github.com/raywall/go-smartdb
 
 go 1.24
 
@@ -7,6 +7,7 @@ require (
 	github.com/dolthub/vitess v0.0.0-20250512224608-8fb9c6ea092c
 	github.com/shopspring/decimal v1.3.1
 	github.com/sirupsen/logrus v1.8.1
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

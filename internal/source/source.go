@@ -1,4 +1,4 @@
-// Package source descobre arquivos JSON no disco e os converte em
+// Package source descobre arquivos JSON, CSV e YAML no disco e os converte em
 // "datasets" tabulares (colunas + linhas) prontos para virar tabelas SQL.
 package source
 
@@ -30,9 +30,19 @@ const (
 	FormatNDJSON
 	// FormatObject: o arquivo é um único objeto; vira uma tabela de 1 linha.
 	FormatObject
+	// FormatCSV representa registros separados por delimitador.
+	FormatCSV
+	// FormatYAMLArray representa uma sequência YAML.
+	FormatYAMLArray
+	// FormatYAMLWrapped representa um mapa com uma única sequência.
+	FormatYAMLWrapped
+	// FormatYAMLObject representa um mapa ou escalar YAML.
+	FormatYAMLObject
+	// FormatYAMLDocuments representa um fluxo com múltiplos documentos YAML.
+	FormatYAMLDocuments
 )
 
-// Dataset é o resultado da leitura de um arquivo JSON.
+// Dataset é o resultado da leitura de um arquivo tabular.
 type Dataset struct {
 	Database string    // nome do banco (diretório) ao qual a tabela pertence
 	Table    string    // nome da tabela (derivado do nome do arquivo)
@@ -42,7 +52,9 @@ type Dataset struct {
 	ModTime  time.Time // mtime no momento da leitura
 	Columns  []Column  // colunas inferidas, na ordem de primeira aparição
 	Rows     []map[string]any
-	keyOrder []string // ordem das chaves conforme aparecem no arquivo
+	CSV      CSVOptions // dialeto CSV detectado na leitura
+	Headers  []string   // ordem original das colunas CSV
+	keyOrder []string   // ordem das chaves conforme aparecem no arquivo
 }
 
 // Kind é o tipo lógico inferido para uma coluna.
@@ -69,7 +81,7 @@ type Column struct {
 	PrimaryKey bool
 }
 
-var supportedExt = map[string]bool{".json": true, ".ndjson": true, ".jsonl": true}
+var supportedExt = map[string]bool{".json": true, ".ndjson": true, ".jsonl": true, ".csv": true, ".yaml": true, ".yml": true}
 
 // IsSupported informa se a extensão do arquivo é reconhecida.
 func IsSupported(path string) bool {
@@ -83,7 +95,7 @@ type Entry struct {
 	Path     string
 }
 
-// Discover percorre os caminhos informados e devolve os arquivos JSON
+// Discover percorre os caminhos informados e devolve os arquivos suportados
 // encontrados. Regras:
 //   - arquivo avulso       -> tabela no banco padrão
 //   - arquivos de um dir.  -> tabelas no banco padrão
@@ -179,9 +191,18 @@ func TableName(path string) string {
 	return Identifier(strings.TrimSuffix(base, filepath.Ext(base)))
 }
 
-// Load lê e interpreta um arquivo JSON. pkName é o nome (case-insensitive)
+// Load lê e interpreta um arquivo JSON, CSV ou YAML. pkName é o nome (case-insensitive)
 // da coluna candidata a chave primária; string vazia desativa a detecção.
 func Load(e Entry, pkName string) (*Dataset, error) {
+	return LoadWithOptions(e, pkName, CSVOptions{})
+}
+
+// LoadWithOptions carrega um arquivo com opções de interpretação CSV.
+// Os demais formatos ignoram csvOptions; erros incluem o caminho da origem.
+func LoadWithOptions(e Entry, pkName string, csvOptions CSVOptions) (*Dataset, error) {
+	if !IsSupported(e.Path) {
+		return nil, fmt.Errorf("%s: extensão não suportada", e.Path)
+	}
 	info, err := os.Stat(e.Path)
 	if err != nil {
 		return nil, err
@@ -193,16 +214,25 @@ func Load(e Entry, pkName string) (*Dataset, error) {
 	ds := &Dataset{Database: e.Database, Table: e.Table, Path: e.Path, ModTime: info.ModTime()}
 
 	ext := strings.ToLower(filepath.Ext(e.Path))
-	if ext == ".ndjson" || ext == ".jsonl" {
+	switch ext {
+	case ".csv":
+		ds.Format = FormatCSV
+		ds.Rows, ds.Headers, ds.CSV, err = parseCSV(raw, csvOptions)
+		ds.keyOrder = ds.Headers
+	case ".yaml", ".yml":
+		ds.Rows, ds.Format, ds.WrapKey, ds.keyOrder, err = parseYAML(raw)
+	case ".ndjson", ".jsonl":
 		ds.Format = FormatNDJSON
 		ds.Rows, err = parseNDJSON(raw)
-	} else {
+	default:
 		ds.Rows, ds.Format, ds.WrapKey, err = parseJSON(raw)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", e.Path, err)
 	}
-	ds.keyOrder = keyOrder(raw, ds.Format, ds.WrapKey)
+	if ds.keyOrder == nil {
+		ds.keyOrder = keyOrder(raw, ds.Format, ds.WrapKey)
+	}
 	ds.Columns = inferColumns(ds.Rows, ds.keyOrder, pkName)
 	return ds, nil
 }

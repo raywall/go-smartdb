@@ -1,4 +1,4 @@
-// Package catalog transforma datasets JSON em bancos/tabelas do motor SQL em
+// Package catalog transforma datasets JSON, CSV e YAML em bancos/tabelas do motor SQL em
 // memória (go-mysql-server) e mantém o vínculo tabela <-> arquivo para
 // recarga automática (watch) e persistência das alterações (persist).
 package catalog
@@ -20,14 +20,15 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/dolthub/vitess/go/vt/proto/query"
 
-	"github.com/raywall/go-dbserver-plugin/internal/source"
+	"github.com/raywall/go-smartdb/internal/source"
 )
 
 // Options controla o comportamento do catálogo.
 type Options struct {
-	Paths     []string // arquivos e/ou diretórios de origem
-	DefaultDB string   // banco que recebe os arquivos "soltos"
-	PKColumn  string   // nome da coluna usada como PK ("" desativa)
+	Paths     []string          // arquivos e/ou diretórios de origem
+	DefaultDB string            // banco que recebe os arquivos "soltos"
+	PKColumn  string            // nome da coluna usada como PK ("" desativa)
+	CSV       source.CSVOptions // opções de leitura CSV
 	// CaseSensitive usa collation binária (utf8mb4_0900_bin) nas colunas de
 	// texto. O padrão é utf8mb4_0900_ai_ci, igual ao MySQL 8.
 	CaseSensitive bool
@@ -38,6 +39,8 @@ type binding struct {
 	db, table string
 	path      string
 	format    source.Format
+	csv       source.CSVOptions
+	headers   []string
 	wrapKey   string
 	modTime   time.Time
 	hash      [32]byte // hash do conteúdo serializado (evita regravar sem mudança)
@@ -249,7 +252,7 @@ func normalizeNumbers(v any) any {
 }
 
 func (c *Catalog) loadEntry(ctx *sql.Context, e source.Entry) error {
-	ds, err := source.Load(e, c.opts.PKColumn)
+	ds, err := source.LoadWithOptions(e, c.opts.PKColumn, c.opts.CSV)
 	if err != nil {
 		return err
 	}
@@ -304,6 +307,7 @@ func (c *Catalog) install(ctx *sql.Context, ds *source.Dataset) error {
 	b := &binding{
 		db: ds.Database, table: ds.Table, path: ds.Path,
 		format: ds.Format, wrapKey: ds.WrapKey, modTime: ds.ModTime, schemaSig: sig,
+		csv: ds.CSV, headers: ds.Headers,
 	}
 	// Hash inicial calculado a partir da própria tabela, para que a
 	// persistência não reescreva arquivos que não foram alterados.

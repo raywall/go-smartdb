@@ -1,0 +1,9 @@
+- id: 1
+  agente_id: 1
+  departamento_id: 10
+- id: 2
+  agente_id: 2
+  departamento_id: 10
+- id: 3
+  agente_id: 3
+  departamento_id: 20

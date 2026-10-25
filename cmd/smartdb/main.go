@@ -1,11 +1,11 @@
-// jsondb expõe arquivos JSON como um banco de dados MySQL.
+// smartdb expõe arquivos JSON, CSV e YAML como um banco de dados MySQL.
 //
 // Qualquer cliente compatível com MySQL (DBeaver, DataGrip, mysql CLI,
 // drivers JDBC/ODBC, Go, Python...) pode conectar e consultar os dados com SQL.
 //
-//	jsondb -path ./dados                  # diretório: cada .json vira uma tabela
-//	jsondb -path agentes.json -port 3307  # arquivo único
-//	jsondb -path ./dados -watch -persist  # recarrega e grava alterações no disco
+//	smartdb -path ./dados                  # diretório: cada arquivo vira uma tabela
+//	smartdb -path agentes.json -port 3307  # arquivo único
+//	smartdb -path ./dados -watch -persist  # recarrega e grava alterações no disco
 package main
 
 import (
@@ -26,7 +26,8 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/sirupsen/logrus"
 
-	"github.com/raywall/go-dbserver-plugin/internal/catalog"
+	"github.com/raywall/go-smartdb/internal/catalog"
+	"github.com/raywall/go-smartdb/internal/source"
 )
 
 // multiFlag permite repetir -path várias vezes.
@@ -46,25 +47,27 @@ var version = "dev"
 
 func main() {
 	var paths multiFlag
-	flag.Var(&paths, "path", "arquivo .json/.ndjson/.jsonl ou diretório (pode repetir ou separar por vírgula)")
+	flag.Var(&paths, "path", "arquivo .json/.ndjson/.jsonl/.csv/.yaml/.yml ou diretório (pode repetir ou separar por vírgula)")
 	host := flag.String("host", "127.0.0.1", "endereço de escuta (use 0.0.0.0 para aceitar conexões externas)")
 	port := flag.Int("port", 3306, "porta TCP do protocolo MySQL")
-	dbName := flag.String("db", "jsondb", "nome do banco que recebe os arquivos do nível raiz")
+	dbName := flag.String("db", "smartdb", "nome do banco que recebe os arquivos do nível raiz")
 	user := flag.String("user", "root", "usuário aceito na conexão")
 	password := flag.String("password", "", "senha do usuário (vazio = sem senha)")
 	caseSensitive := flag.Bool("case-sensitive", false, "comparações de texto sensíveis a maiúsculas/acentos (collation binária)")
 	pk := flag.String("pk", "id", "coluna usada como chave primária quando única e não nula (vazio desativa)")
 	readOnly := flag.Bool("readonly", false, "rejeita INSERT/UPDATE/DELETE/DDL")
-	persist := flag.Bool("persist", false, "grava de volta nos arquivos JSON as alterações feitas via SQL")
+	persist := flag.Bool("persist", false, "grava de volta nos arquivos JSON, CSV e YAML as alterações feitas via SQL")
 	watch := flag.Bool("watch", false, "recarrega tabelas quando os arquivos mudam no disco")
 	interval := flag.Duration("interval", 2*time.Second, "intervalo de verificação para -watch e -persist")
+	csvDelimiter := flag.String("csv-delimiter", "auto", "separador CSV: auto, tab ou um caractere")
+	csvNoHeader := flag.Bool("csv-no-header", false, "CSV sem cabeçalho: gera column_1, column_2, etc.")
 	verbose := flag.Bool("v", false, "log detalhado (inclui consultas do motor SQL)")
 	showVersion := flag.Bool("version", false, "mostra a versão e sai")
 	flag.Usage = usage
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("jsondb", version)
+		fmt.Println("smartdb", version)
 		return
 	}
 	if len(paths) == 0 {
@@ -87,8 +90,19 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
+	var delimiter rune
+	if *csvDelimiter == "tab" {
+		delimiter = '\t'
+	} else if *csvDelimiter != "auto" {
+		runes := []rune(*csvDelimiter)
+		if len(runes) != 1 || runes[0] == 0 || runes[0] == '"' || runes[0] == '\r' || runes[0] == '\n' || runes[0] == '\uFFFD' {
+			fail("-csv-delimiter deve ser auto, tab ou um caractere válido")
+		}
+		delimiter = runes[0]
+	}
 	cat, err := catalog.New(catalog.Options{
 		Paths:         paths,
+		CSV:           source.CSVOptions{Delimiter: delimiter, NoHeader: *csvNoHeader},
 		DefaultDB:     *dbName,
 		PKColumn:      *pk,
 		CaseSensitive: *caseSensitive,
@@ -98,7 +112,7 @@ func main() {
 	}
 
 	// LOAD DATA / SELECT INTO OUTFILE ficam restritos a um diretório inexistente.
-	_ = sql.SystemVariables.AssignValues(map[string]interface{}{"secure_file_priv": os.DevNull + "/jsondb-disabled"})
+	_ = sql.SystemVariables.AssignValues(map[string]interface{}{"secure_file_priv": os.DevNull + "/smartdb-disabled"})
 	engine := sqle.NewDefault(cat.Provider)
 	engine.ReadOnly.Store(*readOnly)
 
@@ -113,7 +127,7 @@ func main() {
 	srv, err := server.NewServer(server.Config{
 		Protocol: "tcp",
 		Address:  addr,
-		Version:  "8.0.33-jsondb", // drivers JDBC usam a versão para escolher recursos
+		Version:  "8.0.33-smartdb", // drivers JDBC usam a versão para escolher recursos
 	}, engine, sql.NewContext, memory.NewSessionBuilder(cat.Provider), nil)
 	if err != nil {
 		fail(err.Error())
@@ -156,7 +170,7 @@ func printBanner(cat *catalog.Catalog, addr, db, user, pass string, ro, persist,
 	if pass != "" {
 		pw = "(com senha)"
 	}
-	fmt.Fprintf(os.Stderr, "\njsondb %s ouvindo em %s  [protocolo MySQL]\n", version, addr)
+	fmt.Fprintf(os.Stderr, "\nsmartdb %s ouvindo em %s  [protocolo MySQL]\n", version, addr)
 	fmt.Fprintf(os.Stderr, "  usuário: %s %s | banco padrão: %s | modo: %s | watch: %v\n", user, pw, db, mode, watch)
 	fmt.Fprintf(os.Stderr, "  tabelas (%d):\n", len(tables))
 	for _, t := range tables {
@@ -166,16 +180,18 @@ func printBanner(cat *catalog.Catalog, addr, db, user, pass string, ro, persist,
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `jsondb - servidor MySQL sobre arquivos JSON
+	fmt.Fprintf(os.Stderr, `smartdb - servidor MySQL sobre arquivos JSON, CSV e YAML
 
 Uso:
-  jsondb -path <arquivo|diretório> [opções]
+  smartdb -path <arquivo|diretório> [opções]
 
 Cada arquivo vira uma tabela (nome do arquivo sem extensão). Subdiretórios
 viram bancos separados. Formatos aceitos:
   [ {...}, {...} ]            array de objetos
   { "itens": [ {...} ] }      objeto com um único array
   {...}\n{...}                NDJSON (.ndjson / .jsonl)
+  CSV com ou sem cabeçalho (.csv)
+  Listas, objetos ou documentos YAML (.yaml / .yml)
 
 Opções:
 `)

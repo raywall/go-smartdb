@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,8 +17,9 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/shopspring/decimal"
+	"gopkg.in/yaml.v3"
 
-	"github.com/raywall/go-dbserver-plugin/internal/source"
+	"github.com/raywall/go-smartdb/internal/source"
 )
 
 // commit efetiva no banco global as alterações feitas pela sessão interna.
@@ -31,7 +33,7 @@ func commit(ctx *sql.Context) error {
 // Run executa o laço de sincronização até o contexto ser cancelado.
 //   - watch:   recarrega tabelas quando o arquivo muda no disco e carrega
 //     arquivos novos que surgirem nos diretórios observados;
-//   - persist: grava de volta no JSON as alterações feitas via SQL.
+//   - persist: grava de volta no formato de origem as alterações feitas via SQL.
 func (c *Catalog) Run(ctx context.Context, interval time.Duration, watch, persist bool) {
 	if !watch && !persist {
 		return
@@ -166,7 +168,7 @@ func (c *Catalog) Flush() {
 }
 
 func writeAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".jsondb-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".smartdb-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -227,6 +229,8 @@ func (c *Catalog) serialize(ctx *sql.Context, b *binding) ([]byte, error) {
 
 	var buf bytes.Buffer
 	switch b.format {
+	case source.FormatCSV:
+		return serializeCSV(objects, schema, b)
 	case source.FormatNDJSON:
 		for _, o := range objects {
 			buf.Write(o)
@@ -244,9 +248,12 @@ func (c *Catalog) serialize(ctx *sql.Context, b *binding) ([]byte, error) {
 	}
 
 	arr := []byte("[" + string(bytes.Join(objects, []byte(","))) + "]")
-	if b.format == source.FormatWrapped {
+	if b.format == source.FormatWrapped || b.format == source.FormatYAMLWrapped {
 		k, _ := json.Marshal(b.wrapKey)
 		arr = []byte("{" + string(k) + ":" + string(arr) + "}")
+	}
+	if b.format >= source.FormatYAMLArray && b.format <= source.FormatYAMLDocuments {
+		return serializeYAML(objects, arr, b.format)
 	}
 	if err := json.Indent(&buf, arr, "", "  "); err != nil {
 		return nil, err
@@ -308,4 +315,100 @@ func jsonValue(col *sql.Column, v any) (any, error) {
 		return string(t), nil
 	}
 	return v, nil
+}
+
+// serializeCSV mantém a ordem original do cabeçalho, mesmo quando a PK foi
+// movida para o início do schema SQL. Colunas novas são acrescentadas ao final.
+func serializeCSV(objects [][]byte, schema sql.Schema, b *binding) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := csv.NewWriter(&buf)
+	writer.Comma = b.csv.Delimiter
+	writer.UseCRLF = b.csv.UseCRLF
+	var headers []string
+	present := map[string]bool{}
+	for _, col := range schema {
+		present[col.Name] = true
+	}
+	for _, name := range b.headers {
+		if present[name] {
+			headers = append(headers, name)
+			delete(present, name)
+		}
+	}
+	for _, col := range schema {
+		if present[col.Name] {
+			headers = append(headers, col.Name)
+		}
+	}
+	if !b.csv.NoHeader {
+		if err := writer.Write(headers); err != nil {
+			return nil, err
+		}
+	}
+	for _, object := range objects {
+		var values map[string]any
+		decoder := json.NewDecoder(bytes.NewReader(object))
+		decoder.UseNumber()
+		if err := decoder.Decode(&values); err != nil {
+			return nil, err
+		}
+		record := make([]string, len(headers))
+		for i, name := range headers {
+			switch value := values[name].(type) {
+			case nil:
+			case string:
+				record[i] = value
+			default:
+				encoded, err := json.Marshal(value)
+				if err != nil {
+					return nil, err
+				}
+				record[i] = string(encoded)
+			}
+		}
+		if err := writer.Write(record); err != nil {
+			return nil, err
+		}
+	}
+	writer.Flush()
+	return buf.Bytes(), writer.Error()
+}
+
+func serializeYAML(objects [][]byte, array []byte, format source.Format) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := yaml.NewEncoder(&buf)
+	encoder.SetIndent(2)
+	encode := func(data []byte) error {
+		var node yaml.Node
+		if err := yaml.Unmarshal(data, &node); err != nil {
+			return err
+		}
+		var blockStyle func(*yaml.Node)
+		blockStyle = func(n *yaml.Node) {
+			n.Style = 0
+			for _, child := range n.Content {
+				blockStyle(child)
+			}
+		}
+		blockStyle(&node)
+		return encoder.Encode(&node)
+	}
+	if format == source.FormatYAMLDocuments && len(objects) > 0 {
+		for _, object := range objects {
+			if err := encode(object); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		if format == source.FormatYAMLObject && len(objects) == 1 {
+			array = objects[0]
+		}
+		if err := encode(array); err != nil {
+			return nil, err
+		}
+	}
+	if err := encoder.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
