@@ -20,6 +20,40 @@ go build -o bin/smartdb ./cmd/smartdb
 
 Requer Go 1.24+.
 
+## Releases automáticas
+
+O workflow [Release](.github/workflows/release.yml) executa a cada push na branch
+`main`. Ele verifica as dependências, executa `go vet` e os testes com detector de
+concorrência e compila os seis destinos antes de publicar uma GitHub Release.
+
+As versões seguem `v0.1.<número da execução>`, começando em `v0.1.1`. Execuções
+que falham podem deixar lacunas na numeração. Reexecutar uma execução mantém a
+mesma versão; uma release já publicada é preservada.
+
+| Sistema | Arquiteturas | Pacote | Executável |
+|---|---|---|---|
+| Linux | `amd64`, `arm64` | `.tar.gz` | `smartdb` |
+| macOS (`darwin`) | `amd64` (Intel), `arm64` (Apple Silicon) | `.tar.gz` | `smartdb` |
+| Windows | `amd64`, `arm64` | `.zip` | `smartdb.exe` |
+
+Cada pacote inclui o README e os dados de exemplo. A release também inclui
+`checksums.txt`, com os hashes SHA-256 dos seis pacotes, e notas geradas a partir
+do histórico do GitHub. Os executáveis recebem a versão da release em `-version`.
+Os builds usam compilação cruzada sem CGO; os testes executam em Linux amd64.
+
+Para instalar sem Go, baixe o pacote da sua plataforma na aba **Releases** do
+repositório, extraia e execute:
+
+```bash
+./smartdb -path ./exemplos/dados -watch
+# Windows (PowerShell): .\smartdb.exe -path .\exemplos\dados -watch
+```
+
+O workflow usa apenas o `GITHUB_TOKEN` automático, com escrita em conteúdo
+restrita ao job de publicação. Não exige um token pessoal ou secrets adicionais.
+As políticas do repositório devem permitir ao GitHub Actions criar releases e
+tags. Os pacotes não incluem assinatura de código ou notarização do macOS.
+
 ## Uso
 
 ```bash

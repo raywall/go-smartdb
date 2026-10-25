@@ -1,0 +1,166 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify dependencies
+        run: |
+          go mod verify
+          go mod tidy -diff
+
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test -race ./...
+
+      - name: Determine version
+        id: version
+        # run_number is unique per workflow and stays the same on reruns.
+        run: |
+          version="v0.1.${GITHUB_RUN_NUMBER}"
+          [[ "$version" =~ ^v0\.1\.[1-9][0-9]*$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binary
+        run: |
+          mkdir -p stage dist
+          binary=smartdb
+          if [[ "$GOOS" == windows ]]; then binary=smartdb.exe; fi
+          go build -mod=readonly -trimpath \
+            -ldflags="-s -w -X main.version=$VERSION" \
+            -o "stage/$binary" ./cmd/smartdb
+          cp README.md stage/
+          cp -R exemplos stage/
+          if [[ "$GOOS/$GOARCH" == linux/amd64 ]]; then
+            [[ "$(stage/smartdb -version)" == "smartdb $VERSION" ]]
+          fi
+
+      - name: Package release
+        run: |
+          archive="go-smartdb_${VERSION}_${GOOS}_${GOARCH}"
+          if [[ "$GOOS" == windows ]]; then
+            python3 - "$archive" <<'PY'
+          import pathlib
+          import sys
+          import zipfile
+
+          with zipfile.ZipFile(f"dist/{sys.argv[1]}.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+              for path in sorted(pathlib.Path("stage").rglob("*")):
+                  if path.is_file():
+                      archive.write(path, path.relative_to("stage"))
+          PY
+          else
+            tar -czf "dist/$archive.tar.gz" -C stage .
+          fi
+
+      - name: Upload package
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: package-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          packages=(*.tar.gz *.zip)
+          [[ "${#packages[@]}" -eq 6 ]]
+          sha256sum "${packages[@]}" > checksums.txt
+          sha256sum --check checksums.txt
+
+      - name: Publish release
+        run: |
+          # A rerun must never replace an existing tag with a different commit.
+          if git show-ref --verify --quiet "refs/tags/$VERSION"; then
+            [[ "$(git rev-parse "refs/tags/$VERSION^{commit}")" == "$GITHUB_SHA" ]]
+          fi
+
+          if draft=$(gh release view "$VERSION" --json isDraft --jq '.isDraft'); then
+            if [[ "$draft" == false ]]; then
+              echo "Release $VERSION already published; nothing to change."
+              exit 0
+            fi
+            # Recover a draft left behind by an interrupted upload.
+            gh release upload "$VERSION" dist/* --clobber
+            gh release edit "$VERSION" --draft=false
+          else
+            gh release create "$VERSION" dist/* \
+              --target "$GITHUB_SHA" \
+              --title "$VERSION" \
+              --generate-notes
+          fi
